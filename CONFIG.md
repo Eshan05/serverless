@@ -283,6 +283,10 @@ If you're using `@neondatabase/serverless` to connect to a Neon database, you us
 
 **Experimentally**, when `poolQueryViaFetch` is `true` and no listeners for the `"connect"`, `"acquire"`, `"release"` or `"remove"` events are set on the `Pool`, queries via `Pool.query()` will be sent by low-latency HTTP `fetch` request.
 
+HTTP pool queries use only the resolved user, password, host and database. Other connection-string query parameters are not forwarded. In particular, `application_name`, `fallback_application_name`, `options`, `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `query_timeout`, `client_encoding` and `replication` are not applied. The pool warns once about ignored settings from its options, connection string or supported node-postgres environment variables. Empty, `false` and numeric `0` values do not trigger a warning. Queries still use HTTP.
+
+Do not rely on a pool's timeout settings to limit an HTTP query. The warning does not make those settings take effect. Disabling `poolQueryViaFetch` restores the normal WebSocket path, but startup-setting support also depends on the server and its connection pooler. See [Neon's connection pooling limitations](https://neon.com/docs/connect/connection-pooling#connection-pooling-in-transaction-mode).
+
 Default: currently `false` (but may be `true` in future).
 
 Note: this option can only be set globally, **not** on an individual `Client` instance.
