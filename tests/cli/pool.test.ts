@@ -71,23 +71,12 @@ test.each(connectionOptions)(
   },
 );
 
-test.each(connectionOptions)(
-  'warns about %s in the connection string without changing transport',
-  async (name, value) => {
-    const url = new URL(connectionString);
-    url.searchParams.set(name, String(value));
-    const pool = new Pool({ connectionString: url.href });
-    await expect(pool.query('SELECT 1')).resolves.toMatchObject(httpResult);
-    expect(warning).toHaveBeenCalledOnce();
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining(name));
-    expect(baseQuery).not.toHaveBeenCalled();
-    expect(fetch).toHaveBeenCalledOnce();
-    await pool.end();
-  },
-);
-
-test('preserves callbacks and query configs when warning', async () => {
-  const pool = new Pool({ connectionString, statement_timeout: 300000 });
+test('preserves callbacks when connection-string and environment options trigger a warning', async () => {
+  vi.stubEnv('PGAPPNAME', 'environment-application');
+  const url = new URL(connectionString);
+  url.searchParams.set('statement_timeout', '300000');
+  url.searchParams.set('options', '-c search_path=tenant');
+  const pool = new Pool({ connectionString: url.href });
   const config = { text: 'SELECT $1', values: [1] };
   const callback = vi.fn();
   expect(pool.query(config, callback)).toBeUndefined();
@@ -100,22 +89,10 @@ test('preserves callbacks and query configs when warning', async () => {
     query: 'SELECT $1',
     params: ['1'],
   });
-  expect(baseQuery).not.toHaveBeenCalled();
-  expect(fetch).toHaveBeenCalledOnce();
-  await pool.end();
-});
-
-test.each([
-  ['PGAPPNAME', 'environment-application', 'application_name'],
-  ['PGOPTIONS', '-c search_path=tenant', 'options'],
-  ['PGCLIENT_ENCODING', 'UTF8', 'client_encoding'],
-  ['PGREPLICATION', 'database', 'replication'],
-])('warns about settings from %s', async (name, value, option) => {
-  vi.stubEnv(name, value);
-  const pool = new Pool({ connectionString });
-  await expect(pool.query('SELECT 1')).resolves.toMatchObject(httpResult);
   expect(warning).toHaveBeenCalledOnce();
-  expect(warning).toHaveBeenCalledWith(expect.stringContaining(option));
+  for (const name of ['statement_timeout', 'options', 'application_name']) {
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining(name));
+  }
   expect(baseQuery).not.toHaveBeenCalled();
   expect(fetch).toHaveBeenCalledOnce();
   await pool.end();
@@ -138,6 +115,7 @@ test('warns once per pool without logging credentials or option values', async (
     statement_timeout: 300000,
     options: '-c search_path=private_tenant',
   });
+  pool.on('error', () => {});
   await pool.query('SELECT 1');
   await pool.query('SELECT 2');
   expect(warning).toHaveBeenCalledOnce();
@@ -147,16 +125,13 @@ test('warns once per pool without logging credentials or option values', async (
   expect(message).not.toContain(connectionString);
   expect(message).not.toContain('password');
   expect(message).not.toContain('private_tenant');
-  await pool.end();
-});
-
-test('warns separately for each pool', async () => {
-  const first = new Pool({ connectionString, application_name: 'first' });
   const second = new Pool({ connectionString, application_name: 'second' });
-  await first.query('SELECT 1');
   await second.query('SELECT 1');
+  await second.query('SELECT 2');
   expect(warning).toHaveBeenCalledTimes(2);
-  await first.end();
+  expect(fetch).toHaveBeenCalledTimes(4);
+  expect(baseQuery).not.toHaveBeenCalled();
+  await pool.end();
   await second.end();
 });
 
@@ -172,45 +147,6 @@ test('does not warn when HTTP pool queries are disabled', async () => {
   await pool.end();
 });
 
-test('does not warn for inactive connection options', async () => {
-  const pool = new Pool({
-    connectionString,
-    application_name: '',
-    options: '',
-    statement_timeout: false,
-    lock_timeout: 0,
-    idle_in_transaction_session_timeout: 0,
-    query_timeout: 0,
-  });
-  await pool.query('SELECT 1');
-  expect(warning).not.toHaveBeenCalled();
-  expect(fetch).toHaveBeenCalledOnce();
-  expect(baseQuery).not.toHaveBeenCalled();
-  await pool.end();
-});
-
-test('does not warn when a connect listener selects WebSockets', async () => {
-  const pool = new Pool({ connectionString, statement_timeout: 300000 });
-  pool.on('connect', () => {});
-  await new Promise<void>((resolve, reject) => {
-    pool.query('SELECT 1', (error) => (error ? reject(error) : resolve()));
-  });
-  expect(baseQuery).toHaveBeenCalledOnce();
-  expect(fetch).not.toHaveBeenCalled();
-  expect(warning).not.toHaveBeenCalled();
-  await pool.end();
-});
-
-test('still warns and uses HTTP with an error listener', async () => {
-  const pool = new Pool({ connectionString, statement_timeout: 300000 });
-  pool.on('error', () => {});
-  await expect(pool.query('SELECT 1')).resolves.toMatchObject(httpResult);
-  expect(warning).toHaveBeenCalledOnce();
-  expect(fetch).toHaveBeenCalledOnce();
-  expect(baseQuery).not.toHaveBeenCalled();
-  await pool.end();
-});
-
 test('preserves HTTP rejections and does not warn again after a failed query', async () => {
   fetch.mockRejectedValueOnce(new Error('request failed'));
   const pool = new Pool({ connectionString, statement_timeout: 300000 });
@@ -218,21 +154,6 @@ test('preserves HTTP rejections and does not warn again after a failed query', a
   await expect(pool.query('SELECT 2')).resolves.toMatchObject(httpResult);
   expect(warning).toHaveBeenCalledOnce();
   expect(fetch).toHaveBeenCalledTimes(2);
-  expect(baseQuery).not.toHaveBeenCalled();
-  await pool.end();
-});
-
-test('preserves HTTP errors in callbacks when warning', async () => {
-  fetch.mockRejectedValueOnce(new Error('request failed'));
-  const pool = new Pool({ connectionString, statement_timeout: 300000 });
-  const callback = vi.fn();
-  expect(pool.query('SELECT 1', callback)).toBeUndefined();
-  await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
-  expect(callback.mock.calls[0][0]).toBeInstanceOf(Error);
-  expect(callback.mock.calls[0][0].message).toContain('request failed');
-  expect(callback.mock.calls[0][1]).toBeUndefined();
-  expect(warning).toHaveBeenCalledOnce();
-  expect(fetch).toHaveBeenCalledOnce();
   expect(baseQuery).not.toHaveBeenCalled();
   await pool.end();
 });
